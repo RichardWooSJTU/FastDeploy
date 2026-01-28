@@ -43,6 +43,7 @@ from fastdeploy.model_executor.layers.attention.ops import (
     pre_cache_len_concat,
 )
 from fastdeploy.model_executor.layers.attention.utils import init_rank_and_device_id
+from fastdeploy.usage.usage_lib import cuda_get_device_properties
 
 if TYPE_CHECKING:
     from fastdeploy.model_executor.forward_meta import ForwardMeta
@@ -50,12 +51,85 @@ if TYPE_CHECKING:
 from fastdeploy.platforms import current_platform
 
 if current_platform.is_cuda():
-    from fastdeploy.model_executor.ops.gpu import merge_prefill_decode_output
+    from fastdeploy.model_executor.ops.gpu import (
+        merge_prefill_decode_output,
+        transform_attn_mask_offsets,
+    )
+
+    try:
+        from flash_mask.cute.interface import flashmask_attention
+    except ImportError:
+        flashmask_attention = None
 else:
     merge_prefill_decode_output = None
+    flashmask_attention = None
 
 import os
 
+FLASH_ATNN_VERSION = None
+
+
+def flash_attn_func(
+    q: paddle.Tensor = None,
+    k: paddle.Tensor = None,
+    v: paddle.Tensor = None,
+    cu_seqlens_q: paddle.Tensor = None,
+    cu_seqlens_k: paddle.Tensor = None,
+    max_seqlen_q: paddle.Tensor = None,
+    max_seqlen_k: paddle.Tensor = None,
+    fa4_attn_mask_offsets: paddle.Tensor = None,
+    causal: bool = True,
+    num_heads: int = None,
+    kv_num_heads: int = None,
+    head_dim: int = 128,
+):
+    assert FLASH_ATNN_VERSION is not None
+    if FLASH_ATNN_VERSION == 4:
+        assert flashmask_attention is not None, "Cannot import flashmask_attention, please install it first"
+        assert fa4_attn_mask_offsets is not None
+        assert num_heads is not None
+        assert kv_num_heads is not None
+        original_flash_attn_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        with paddle.no_grad():
+            paddle.set_flags({"FLAGS_flash_attn_version": 4})
+            out = flashmask_attention(
+                q.reshape([1, -1, num_heads, head_dim]),
+                k.reshape([1, -1, kv_num_heads, head_dim]),
+                v.reshape([1, -1, kv_num_heads, head_dim]),
+                startend_row_indices=fa4_attn_mask_offsets,
+                causal=False,
+                return_softmax_lse=True,
+                training=True,
+            )
+        paddle.set_flags({"FLAGS_flash_attn_version": original_flash_attn_version})
+        return out
+
+    elif FLASH_ATNN_VERSION == 3:
+        out = flash_attention_v3_varlen(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            causal=causal,
+        )
+    else:
+        out = flash_attn_unpadded(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            causal=causal,
+            scale=head_dim**-0.5,
+            training=False,
+        )
 
 @dataclass
 class FlashAttentionMetadata(AttentionMetadata):
@@ -78,6 +152,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     _dtype: paddle.dtype = paddle.bfloat16
 
     max_len_tensor_cpu_decoder: paddle.Tensor = None
+    fa4_attn_mask_offsets: paddle.Tensor = None
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -127,27 +202,70 @@ class FlashAttentionBackend(AttentionBackend):
 
         self.rank, self.device_id = init_rank_and_device_id(fd_config)
 
+        print(f"self.device_id {self.device_id}")
+        paddle.set_device("gpu:" + self.device_id)
+
         if self.flash_attn_func is None:
-            prop = paddle.device.cuda.get_device_properties()
-            cc = prop.major * 10 + prop.minor
-            is_current_sm_supported = cc >= 90
-            is_paddle_supported = any(num >= 90 for num in paddle.version.cuda_archs())
-            if is_current_sm_supported and is_paddle_supported:
-                self.flash_attn_func = flash_attention_v3_varlen
-                print("The current platform supports Flash Attention V3.")
-                self.flash_attn_kwargs = {}
-            else:
-                self.flash_attn_func = flash_attn_unpadded
-                self.flash_attn_kwargs = {"scale": self.head_dim**-0.5, "training": False}
-                print(
-                    "The current platform does not support Flash Attention V3, so Flash Attention V2 will be used instead."
-                )
-        self.rope_3d: bool = getattr(fd_config.model_config, "rope_3d", False)
+            # Use cuda_get_device_properties to safely get device properties
+            # without initializing CUDA in the current process (important for subprocess)
+            try:
+                major, minor = cuda_get_device_properties(self.device_id, ["major", "minor"])
+                if major is None or minor is None:
+                    raise RuntimeError("Failed to get CUDA device properties")
+                cc = major * 10 + minor
+            except Exception as e:
+                print(f"Warning: Failed to get CUDA device properties: {e}")
+                # Fallback to default version if device properties unavailable
+                cc = 100  # Assume CUDA 10.0 as default
+            
+            global FLASH_ATNN_VERSION
+            if flashmask_attention is not None and cc >= 100:
+                FLASH_ATNN_VERSION = 4
+                print("The current platform supports Flash Attention V4.")
+            elif FLASH_ATNN_VERSION is None:
+                if cc >= 90 and any(num >= 90 for num in paddle.version.cuda_archs()):
+                    FLASH_ATNN_VERSION = 3
+                    print("The current platform supports Flash Attention V3.")
+                else:
+                    FLASH_ATNN_VERSION = 2
+                    print("The current platform only support Flash Attention V2.")
+        self.rope_3d: bool = getattr(fd_config.model_config, "rope_3d", False) or getattr(
+            fd_config.model_config, "use_3d_rope", False
+        )
         # Note(ZKK): here must be consistent with append_attn_backend.py
         self.max_partition_size: int = int(os.getenv("FLAGS_max_partition_size", 1024))
         self.zero_seq_enc_lens_for_decode = paddle.zeros(
             shape=[fd_config.scheduler_config.max_num_seqs, 1], dtype=paddle.int32
         )
+
+    @staticmethod
+    def get_kv_cache_shape_static(
+        max_num_blocks: int,
+        kv_num_heads: int,
+        block_size: int,
+        head_dim: int,
+        kv_cache_quant_type: str = None,
+    ):
+        """
+        Calculate kv cache shape without initializing the backend.
+        This is a static method that can be called without instantiating the class,
+        useful for cache_manager process to avoid unnecessary CUDA initialization.
+
+        Args:
+            max_num_blocks: Maximum number of blocks
+            kv_num_heads: Number of key-value heads
+            block_size: Size of each block
+            head_dim: Dimension of each head
+            kv_cache_quant_type: Type of KV cache quantization
+
+        Returns:
+            Tuple of (key_cache_shape, value_cache_shape)
+        """
+        key_cache_shape = [max_num_blocks, kv_num_heads, block_size, head_dim]
+        if kv_cache_quant_type is not None and kv_cache_quant_type == "int4_zp":
+            key_cache_shape[-1] = head_dim // 2
+        value_cache_shape = key_cache_shape
+        return key_cache_shape, value_cache_shape
 
     def get_kv_cache_shape(
         self,
@@ -155,13 +273,15 @@ class FlashAttentionBackend(AttentionBackend):
         kv_cache_quant_type: str = None,
     ):
         """
-        Calculate kv cache shape
+        Calculate kv cache shape (instance method for backward compatibility)
         """
-        key_cache_shape = [max_num_blocks, self.kv_num_heads, self.block_size, self.head_dim]
-        if kv_cache_quant_type is not None and kv_cache_quant_type == "int4_zp":
-            key_cache_shape[-1] = self.head_dim // 2
-        value_cache_shape = key_cache_shape
-        return key_cache_shape, value_cache_shape
+        return self.get_kv_cache_shape_static(
+            max_num_blocks=max_num_blocks,
+            kv_num_heads=self.kv_num_heads,
+            block_size=self.block_size,
+            head_dim=self.head_dim,
+            kv_cache_quant_type=kv_cache_quant_type,
+        )
 
     def init_attention_metadata(self, forward_meta: ForwardMeta):
         metadata = FlashAttentionMetadata()
@@ -201,6 +321,14 @@ class FlashAttentionBackend(AttentionBackend):
                 forward_meta.max_len_tensor_cpu[2],
                 self.block_size,
             )
+
+            if FLASH_ATNN_VERSION == 4:
+                metadata.fa4_attn_mask_offsets = transform_attn_mask_offsets(
+                    forward_meta.cu_seqlens_q,
+                    metadata.cu_seqlens_k,
+                    forward_meta.attn_mask_offsets,
+                    metadata.kv_token_num_cpu[0].item(),
+                )
 
         # pd_disaggregation
         metadata.kv_signal_data_list = [None] * self.num_layers
@@ -287,16 +415,19 @@ class FlashAttentionBackend(AttentionBackend):
                 self.rope_3d,
             )
 
-            res_encoder = self.flash_attn_func(
+            res_encoder = flash_attn_func(
                 q,
                 k,
                 v,
-                forward_meta.cu_seqlens_q,
+                forward_meta.cu_seqlens_q[: metadata.cu_seqlens_k.shape[0]],
                 metadata.cu_seqlens_k,
                 max_seqlen_q=forward_meta.max_len_tensor_cpu[0],
                 max_seqlen_k=forward_meta.max_len_tensor_cpu[3],
+                fa4_attn_mask_offsets=metadata.fa4_attn_mask_offsets,
                 causal=self.causal,
-                **self.flash_attn_kwargs,
+                num_heads=self.num_heads,
+                kv_num_heads=self.kv_num_heads,
+                head_dim=self.head_dim,
             )[0].reshape([-1, self.attn_outputsize_tp])
 
         res_decoder = append_attention(

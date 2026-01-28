@@ -1841,8 +1841,10 @@ class EngineService:
                         start_data_parallel_service,
                     )
 
+                    ctx = multiprocessing.get_context('spawn')
+
                     self.dp_processed.append(
-                        multiprocessing.Process(
+                        ctx.Process(
                             target=start_data_parallel_service,
                             args=(
                                 self.cfg,

@@ -1106,6 +1106,12 @@ std::vector<paddle::Tensor> FusedNeoxRopeEmbedding(
 
 std::vector<paddle::Tensor> GeluTanh(paddle::Tensor& input);
 
+std::vector<paddle::Tensor> transform_attn_mask_offsets(
+    const paddle::Tensor& cu_seqlens_q,
+    const paddle::Tensor& cu_seqlens_k,
+    const paddle::optional<paddle::Tensor>& attn_mask_offsets,
+    const int kv_token_num);
+
 PYBIND11_MODULE(fastdeploy_ops, m) {
   m.def("get_expert_token_num",
         &GetExpertTokenNum,
@@ -1707,4 +1713,8 @@ PYBIND11_MODULE(fastdeploy_ops, m) {
         "fused_neox_rope_embedding function");
 
   m.def("gelu_tanh", &GeluTanh, "gelu_tanh function");
+
+  m.def("transform_attn_mask_offsets",
+        &transform_attn_mask_offsets,
+        "transform_attn_mask_offsets function");
 }

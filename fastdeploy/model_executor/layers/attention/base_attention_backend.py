@@ -42,6 +42,43 @@ class AttentionBackend(ABC):
         """Initialize the forward metadata."""
         raise NotImplementedError
 
+    @staticmethod
+    @abstractmethod
+    def get_kv_cache_shape_static(
+        max_num_blocks: int,
+        kv_num_heads: int,
+        block_size: int,
+        head_dim: int,
+        kv_cache_quant_type: str = None,
+    ):
+        """
+        Calculate kv cache shape without initializing the backend.
+        This is a static method that can be called without instantiating the class,
+        useful for cache_manager process to avoid unnecessary CUDA/device initialization.
+
+        Args:
+            max_num_blocks: Maximum number of blocks
+            kv_num_heads: Number of key-value heads
+            block_size: Size of each block
+            head_dim: Dimension of each head
+            kv_cache_quant_type: Type of KV cache quantization
+
+        Returns:
+            Tuple of (key_cache_shape, value_cache_shape)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_kv_cache_shape(
+        self,
+        max_num_blocks: int,
+        kv_cache_quant_type: str = None,
+    ):
+        """
+        Calculate kv cache shape (instance method).
+        """
+        raise NotImplementedError
+
     def forward(
         self,
         q: paddle.Tensor,

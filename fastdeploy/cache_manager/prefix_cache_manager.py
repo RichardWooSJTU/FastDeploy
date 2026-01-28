@@ -131,6 +131,10 @@ class PrefixCacheManager:
         main_process_metrics.available_gpu_resource.set(1.0)
 
     def _get_kv_cache_shape(self, max_block_num):
+        """
+        Calculate KV cache shape without initializing the full attention backend.
+        This avoids unnecessary CUDA initialization in the cache_manager process.
+        """
         from fastdeploy.model_executor.layers.attention import get_attention_backend
 
         attn_cls = get_attention_backend()
@@ -140,6 +144,7 @@ class PrefixCacheManager:
             int(self.config.model_config.num_key_value_heads) // self.config.parallel_config.tensor_parallel_size,
         )
         head_dim = self.config.model_config.head_dim
+        block_size = self.config.cache_config.block_size
 
         kv_cache_quant_type = None
         if (
@@ -149,17 +154,28 @@ class PrefixCacheManager:
         ):
             kv_cache_quant_type = self.config.quant_config.kv_cache_quant_type
 
-        # Initialize AttentionBackend buffers
-        encoder_block_shape_q = 64
-        decoder_block_shape_q = 16
-        key_cache_shape, value_cache_shape = attn_cls(
-            self.config,
-            kv_num_heads=kv_num_heads,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            encoder_block_shape_q=encoder_block_shape_q,
-            decoder_block_shape_q=decoder_block_shape_q,
-        ).get_kv_cache_shape(max_num_blocks=max_block_num, kv_cache_quant_type=kv_cache_quant_type)
+        # Use static method to avoid backend initialization and CUDA operations
+        if hasattr(attn_cls, 'get_kv_cache_shape_static'):
+            key_cache_shape, value_cache_shape = attn_cls.get_kv_cache_shape_static(
+                max_num_blocks=max_block_num,
+                kv_num_heads=kv_num_heads,
+                block_size=block_size,
+                head_dim=head_dim,
+                kv_cache_quant_type=kv_cache_quant_type,
+            )
+        else:
+            # Fallback to instance method for backends that don't have static method yet
+            encoder_block_shape_q = 64
+            decoder_block_shape_q = 16
+            key_cache_shape, value_cache_shape = attn_cls(
+                self.config,
+                kv_num_heads=kv_num_heads,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                encoder_block_shape_q=encoder_block_shape_q,
+                decoder_block_shape_q=decoder_block_shape_q,
+            ).get_kv_cache_shape(max_num_blocks=max_block_num, kv_cache_quant_type=kv_cache_quant_type)
+
         logger.info(f"key_cache_shape {key_cache_shape} value_cache_shape {value_cache_shape}")
         return key_cache_shape, value_cache_shape
 
