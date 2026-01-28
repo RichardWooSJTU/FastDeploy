@@ -166,10 +166,11 @@ class DeepEPBuffer:
     def _create_low_latency_buffer(self):
         if self.deepep_buffer is None:
             assert self.num_experts % self.ep_size == 0
-            if self.ep_size // 8 > 1:
-                num_qps_per_rank_now = self.ep_size // 8
-            else:
-                num_qps_per_rank_now = 1
+            # if self.ep_size // 8 > 1:
+            #     num_qps_per_rank_now = self.ep_size // 8
+            # else:
+            #     num_qps_per_rank_now = 1
+            num_qps_per_rank_now = self.num_experts // self.ep_size
             self.deepep_buffer = deep_ep.Buffer(
                 self.group,
                 self.num_nvl_bytes,
