@@ -638,6 +638,7 @@ class EPPrefillRunner(EPRunner):
             "async_finish": self.ep_engine.async_finish,
             "topk_weights": recv_topk_weights,
             "previous_event": event,
+            "allocate_on_comm_stream": EPPrefillRunner.allocate_on_comm_stream,
         }
         fused_moe_out, _, event = buffer.combine(**combine_args)
         return fused_moe_out, event

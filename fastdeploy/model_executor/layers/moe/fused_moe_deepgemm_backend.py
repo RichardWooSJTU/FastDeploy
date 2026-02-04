@@ -316,7 +316,7 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 token_all_num,
             )
             assert permute_input.shape[0] == token_all_num
-            del recv_x
+            # del recv_x
 
             if not self.quant_config.deepgemm_scale_ue8m0:
                 permute_scale = permute_scale.transpose([1, 0]).contiguous().transpose([1, 0])
@@ -333,7 +333,7 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 m_indices,
                 disable_ue8m0_cast=not self.quant_config.deepgemm_scale_ue8m0,
             )
-            del permute_input
+            # del permute_input
 
             # swiglu
             ffn_out = paddle.incubate.nn.functional.swiglu(ffn_out, None)
@@ -347,7 +347,7 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
             if not self.quant_config.deepgemm_scale_ue8m0:
                 ffn_in_x_scale_tensor = ffn_in_x_scale_tensor.transpose([1, 0]).contiguous().transpose([1, 0])
 
-            del ffn_out
+            # del ffn_out
             ffn_out = paddle.empty(
                 (token_all_num, getattr(layer, self.added_weight_attrs[1]).shape[1]),
                 dtype=paddle.bfloat16,
@@ -359,7 +359,7 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 m_indices,
                 disable_ue8m0_cast=not self.quant_config.deepgemm_scale_ue8m0,
             )
-            del ffn_in_x
+            # del ffn_in_x
 
             # prmt back per rank
             tmp_ffn_out = fastdeploy.model_executor.ops.gpu.ep_moe_expert_combine(
@@ -371,7 +371,7 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 False,  # norm_topk_prob
                 1.0,
             )
-            del ffn_out
+            # del ffn_out
         else:
             tmp_ffn_out = paddle.empty([0, hidden_size], paddle.bfloat16)
 
