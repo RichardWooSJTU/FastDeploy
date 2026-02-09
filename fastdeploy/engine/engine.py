@@ -598,6 +598,7 @@ class LLMEngine:
             "lm_head_fp32": self.cfg.model_config.lm_head_fp32,
             "shutdown_comm_group_if_worker_idle": self.cfg.parallel_config.shutdown_comm_group_if_worker_idle,
             "enable_entropy": self.cfg.model_config.enable_entropy,
+            "ep_prefill_use_worst_num_tokens": self.cfg.parallel_config.ep_prefill_use_worst_num_tokens,
         }
         for worker_flag, value in worker_store_true_flag.items():
             if value:

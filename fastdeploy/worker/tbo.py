@@ -166,7 +166,6 @@ def split_batch_decoder_layers(forward_meta: ForwardMeta, fd_config):
             res[i].decode_states = forward_meta.decode_states[start_bs:end_bs]
 
         res[i].tbo_microbatch_id = i
-        res[i].attn_backend.init_attention_metadata(res[i])
 
 
     return res

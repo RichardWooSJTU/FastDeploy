@@ -24,8 +24,12 @@ import fastdeploy
 from fastdeploy import envs
 from fastdeploy.model_executor.layers.utils import get_tensor
 from fastdeploy.model_executor.ops.gpu import count_tokens_per_expert_func
+from fastdeploy.model_executor.ops.cute_dsl_ops.permute_prefill_masked_gemm import (
+    call_prefill_permute_to_masked_gemm,
+)
 from fastdeploy.utils import register_custom_python_op
 from fastdeploy.worker.tbo import let_another_thread_run
+
 
 from .fused_moe_backend_base import MoEMethodBase
 from .fused_moe_triton_backend import BlockWiseFP8MoEMethod
@@ -283,13 +287,79 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
 
         token_all_num = sum(recv_num_tokens_per_expert_list)
 
+        if token_all_num == 0:
+            token_all_num = self.ep_prefill_runner.num_worst_tokens
+
         # Note(ZKK):
         # below code have many del, so ugly!
         # but considering MoE Prefill will reach peak GPU memory,
         # so here we manually del a var as soon as it's not used.
 
         # 4. Compute ffn
-        if token_all_num > 0:
+         if self.ep_prefill_runner.num_worst_tokens > 0:
+            
+            max_tokens_per_rank = layer.fd_config.scheduler_config.max_num_batched_tokens // layer.fd_config.parallel_config.tensor_parallel_size
+            expected_m = max_tokens_per_rank
+
+            up_gate_proj_out = paddle.empty(
+                [
+                    layer.num_local_experts,
+                    layer.ep_size * max_tokens_per_rank,
+                    layer.moe_intermediate_size * 2,
+                ],
+                dtype=paddle.bfloat16,
+            )
+
+            permute_input, permute_scale, token_nums_per_expert = call_prefill_permute_to_masked_gemm(
+                x=recv_x,
+                scale=recv_x_scale,
+                topk_ids=recv_topk_idx,
+                num_local_experts=layer.num_local_experts,
+                max_token_num=layer.ep_size * max_tokens_per_rank,
+            )
+
+            deep_gemm.m_grouped_fp8_gemm_nt_masked(
+                (permute_input, permute_scale), # [num_local_experts, ep_size * max_tokens_perrank, hidden]
+                (
+                    getattr(layer, self.added_weight_attrs[0]),
+                    getattr(layer, self.added_scale_attrs[0]),
+                ),
+                up_gate_proj_out,
+                token_nums_per_expert, # [num_local_experts]
+                expected_m,
+                disable_ue8m0_cast=not self.quant_config.deepgemm_scale_ue8m0,
+            )
+
+            act_out = fastdeploy.model_executor.ops.gpu.group_swiglu_with_masked(up_gate_proj_out, token_nums_per_expert)
+            act_out_fp8, scale = fastdeploy.model_executor.ops.gpu.masked_per_token_quant(
+                act_out,
+                token_nums_per_expert,
+                self.quant_config.weight_block_size[0],
+                use_ue8m0=self.quant_config.deepgemm_scale_ue8m0,
+            )
+
+            ffn_out = paddle.empty(
+                [
+                    layer.num_local_experts,
+                    layer.ep_size * max_tokens_per_rank,
+                    layer.hidden_size,
+                ],
+                dtype=paddle.bfloat16,
+            )
+
+            deep_gemm.m_grouped_fp8_gemm_nt_masked(
+                (act_out_fp8, scale),
+                (
+                    getattr(layer, self.added_weight_attrs[1]),
+                    getattr(layer, self.added_scale_attrs[1]),
+                ),
+                ffn_out,
+                token_nums_per_expert,
+                expected_m,
+                disable_ue8m0_cast=not self.quant_config.deepgemm_scale_ue8m0,
+            )
+
+        elif token_all_num > 0:
             logger.debug(f"token_all_num {token_all_num}")
             (recv_x, recv_x_scale) = recv_x
 
@@ -299,11 +369,11 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 permute_input,
                 permute_scale,
                 permute_indices_per_token,
-                recv_num_tokens_per_expert_list_cumsum,
-                recv_num_tokens_per_expert_list_padded_cumsum,
+                _, # recv_num_tokens_per_expert_list_cumsum,
+                _, # recv_num_tokens_per_expert_list_padded_cumsum,
                 dst_weights,
                 dst_indices,
-                cumsum_idx_gpu,
+                _, # cumsum_idx_gpu,
                 m_indices,
             ) = fastdeploy.model_executor.ops.gpu.ep_moe_expert_dispatch_fp8(
                 recv_x,

@@ -968,6 +968,12 @@ def parse_args():
         help="Number of cpu blocks.",
     )
 
+    parser.add_argument(
+        "--ep_prefill_use_worst_num_tokens",
+        action="store_true",
+        help="enable to avoid cpu sync",
+    )
+
     args = parser.parse_args()
     return args
 

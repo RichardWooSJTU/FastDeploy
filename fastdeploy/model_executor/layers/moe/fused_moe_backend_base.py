@@ -102,6 +102,7 @@ class MoEMethodBase(QuantMethodBase):
                     self.ep_prefill_runner = self.EPPrefillRunner(
                         **common_args,
                         use_internode_ll_two_stage=layer.fd_config.parallel_config.use_internode_ll_two_stage,
+                        prefill_num_worst_tokens = config.scheduler_config.max_num_batched_tokens // config.parallel_config.tensor_parallel_size * layer.ep_size * layer.top_k if config.parallel_config.ep_prefill_use_worst_num_tokens else 0
                     )
                     self.ep_decoder_runner = self.EPDecoderRunner(
                         **common_args,
@@ -119,6 +120,7 @@ class MoEMethodBase(QuantMethodBase):
                 self.ep_prefill_runner = self.EPPrefillRunner(
                     **common_args,
                     use_internode_ll_two_stage=layer.fd_config.parallel_config.use_internode_ll_two_stage,
+                    prefill_num_worst_tokens = config.scheduler_config.max_num_batched_tokens // config.parallel_config.tensor_parallel_size * layer.ep_size * layer.top_k if config.parallel_config.ep_prefill_use_worst_num_tokens else 0
                 )
             else:
                 self.ep_decoder_runner = self.EPDecoderRunner(

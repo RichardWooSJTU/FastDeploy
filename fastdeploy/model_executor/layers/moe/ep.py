@@ -553,6 +553,7 @@ class EPPrefillRunner(EPRunner):
         moe_phase: MoEPhase = MoEPhase("prefill"),
         ep_group=None,
         use_internode_ll_two_stage: bool = False,
+        prefill_num_worst_tokens: int = 0
     ):
         super().__init__(
             top_k,
@@ -567,6 +568,8 @@ class EPPrefillRunner(EPRunner):
             ep_group=ep_group,
             use_internode_ll_two_stage=use_internode_ll_two_stage,
         )
+        self.num_worst_tokens = prefill_num_worst_tokens
+        logger.info(f"prefill_num_worst_tokens {prefill_num_worst_tokens}")
 
     def set_allocate_on_comm_stream(allocate_on_comm_stream: bool = False):
         if EPPrefillRunner.allocate_on_comm_stream == allocate_on_comm_stream:
@@ -617,6 +620,7 @@ class EPPrefillRunner(EPRunner):
             "expert_alignment": expert_alignment,
             "allocate_on_comm_stream": EPPrefillRunner.allocate_on_comm_stream,
             "previous_event": event,
+            "num_worst_tokens": self.num_worst_tokens,
         }
         return buffer.dispatch(**dispatch_args)
 

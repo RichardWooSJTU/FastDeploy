@@ -47,3 +47,4 @@ aistudio_sdk
 p2pstore
 py-cpuinfo
 flashinfer-python-paddle
+nvidia-cutlass-dsl==4.4.0.dev0

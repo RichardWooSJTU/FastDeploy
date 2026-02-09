@@ -883,19 +883,22 @@ __global__ void permute_x_fp8_kernel(
        s_token_idx += gridDim.x) {
     // the m_indices[s_token_idx] must be a value `i` in [0,
     // num_experts_per_rank) here we parallel wo find the `i` we want.
+    
+    if (threadIdx.x == 0) {
+      m_indices[s_token_idx] = -1;
+    }
+    __syncthreads();
+
     for (int i = threadIdx.x; i < num_experts_per_rank; i += blockDim.x) {
       const int start_idx = i == 0 ? 0 : token_nums_per_expert_cum[i - 1];
       const int end_idx = token_nums_per_expert_cum[i];
       if (s_token_idx >= start_idx && s_token_idx < end_idx) {
         if ((s_token_idx - start_idx) < token_nums_per_expert[i]) {
           m_indices[s_token_idx] = i;
-        } else {
-          m_indices[s_token_idx] = -1;
         }
         break;
       }
     }
-
     if (s_token_idx < num_rows) {
       const int64_t* topk_idx_now = topk_idx + s_token_idx * moe_topk;
 #pragma unroll
