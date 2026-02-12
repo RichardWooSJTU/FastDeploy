@@ -16,6 +16,7 @@
 import cutlass
 import cutlass.cute as cute
 import paddle
+import cuda.bindings.driver as cuda
 
 from cutlass.cute.runtime import from_dlpack
 from .utils import paddle2cute_dtype_map
@@ -112,6 +113,7 @@ def depermute_prefill_combine(
     indice_map: cute.Tensor,
     topk_weights: cute.Tensor,
     depermuted_x: cute.Tensor,
+    stream: cuda.CUstream,
     topk: cutlass.Constexpr,
     copy_bits: cutlass.Constexpr = 128,
 ):  
@@ -138,6 +140,7 @@ def depermute_prefill_combine(
                                           topk).launch(
         grid = [num_block_x, 1, 1],
         block = [cute.cosize(thr_layout), 1, 1],
+        stream=stream,
     )
 
 def call_depermute_prefill_combine(
@@ -170,6 +173,7 @@ def call_depermute_prefill_combine(
     depermuted_x_tensor = from_dlpack(depermuted_x).mark_compact_shape_dynamic(mode=0)
 
     if compile_key not in call_depermute_prefill_combine.compile_cache:
+        stream = cute.runtime.make_fake_stream()
         if topk == 4:
             compiled_func = cute.compile(
                 depermute_prefill_combine,
@@ -177,6 +181,7 @@ def call_depermute_prefill_combine(
                 indice_map_tensor,
                 topk_weights_tensor,
                 depermuted_x_tensor,
+                stream,
                 4,
                 options="--generate-line-info"
             )
@@ -187,16 +192,19 @@ def call_depermute_prefill_combine(
                 indice_map_tensor,
                 topk_weights_tensor,
                 depermuted_x_tensor,
+                stream,
                 8,
                 options="--generate-line-info"
             )
         call_depermute_prefill_combine.compile_cache[compile_key] = compiled_func
 
+    stream = cuda.CUstream(paddle.device.current_stream().stream_base.cuda_stream)
     call_depermute_prefill_combine.compile_cache[compile_key](
         x_tensor,
         indice_map_tensor,
         topk_weights_tensor,
         depermuted_x_tensor,
+        stream,
     )
     return depermuted_x
 

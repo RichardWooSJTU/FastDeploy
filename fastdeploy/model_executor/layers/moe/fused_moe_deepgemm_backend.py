@@ -16,6 +16,7 @@
 
 from typing import Callable
 
+import os
 import paddle
 from paddle import nn
 from paddleformers.utils.log import logger
@@ -27,6 +28,10 @@ from fastdeploy.model_executor.ops.gpu import count_tokens_per_expert_func
 from fastdeploy.model_executor.ops.cute_dsl_ops.permute_prefill_masked_gemm import (
     call_prefill_permute_to_masked_gemm,
 )
+from fastdeploy.model_executor.ops.cute_dsl_ops.depermute_prefill_combine import (
+    call_depermute_prefill_combine,
+)
+
 from fastdeploy.utils import register_custom_python_op
 from fastdeploy.worker.tbo import let_another_thread_run
 
@@ -287,19 +292,29 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
 
         token_all_num = sum(recv_num_tokens_per_expert_list)
 
-        if token_all_num == 0:
-            token_all_num = self.ep_prefill_runner.num_worst_tokens
-
         # Note(ZKK):
         # below code have many del, so ugly!
         # but considering MoE Prefill will reach peak GPU memory,
         # so here we manually del a var as soon as it's not used.
 
         # 4. Compute ffn
-         if self.ep_prefill_runner.num_worst_tokens > 0:
-            
-            max_tokens_per_rank = layer.fd_config.scheduler_config.max_num_batched_tokens // layer.fd_config.parallel_config.tensor_parallel_size
+        if self.ep_prefill_runner.num_worst_tokens > 0:
+            (recv_x, recv_x_scale) = recv_x
+            token_split_factor = 2 if int(os.getenv("USE_TBO", "0")) == 1 else 1
+            max_tokens_per_rank = layer.fd_config.scheduler_config.max_num_batched_tokens // layer.fd_config.parallel_config.tensor_parallel_size // token_split_factor
             expected_m = max_tokens_per_rank
+
+            logger.info(f"recv_topk_idx {recv_topk_idx}")
+
+            permute_input, permute_scale, permuted_indice_map, token_nums_per_expert = call_prefill_permute_to_masked_gemm(
+                x=recv_x,
+                scale=recv_x_scale,
+                topk_ids=recv_topk_idx,
+                num_local_experts=layer.num_local_experts,
+                max_token_num=layer.ep_size * max_tokens_per_rank,
+            )
+            logger.info(f"token_nums_per_expert {token_nums_per_expert}")
+            logger.info(f"permute_scale {permute_scale.shape} strides {permute_scale.strides}")
 
             up_gate_proj_out = paddle.empty(
                 [
@@ -308,14 +323,6 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                     layer.moe_intermediate_size * 2,
                 ],
                 dtype=paddle.bfloat16,
-            )
-
-            permute_input, permute_scale, token_nums_per_expert = call_prefill_permute_to_masked_gemm(
-                x=recv_x,
-                scale=recv_x_scale,
-                topk_ids=recv_topk_idx,
-                num_local_experts=layer.num_local_experts,
-                max_token_num=layer.ep_size * max_tokens_per_rank,
             )
 
             deep_gemm.m_grouped_fp8_gemm_nt_masked(
@@ -338,14 +345,31 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 use_ue8m0=self.quant_config.deepgemm_scale_ue8m0,
             )
 
-            ffn_out = paddle.empty(
-                [
-                    layer.num_local_experts,
-                    layer.ep_size * max_tokens_per_rank,
-                    layer.hidden_size,
-                ],
-                dtype=paddle.bfloat16,
-            )
+            if layer.hidden_size == layer.moe_intermediate_size * 2:
+                # act_out_fp8 = permute_input[:, :, :layer.moe_intermediate_size]
+
+                # scale_pack_num = 4 if self.quant_config.deepgemm_scale_ue8m0 else 1
+                # logger.info(f"scale num {layer.moe_intermediate_size // self.quant_config.weight_block_size[0] // scale_pack_num}")
+                # scale = permute_scale[:, :, : (layer.moe_intermediate_size // self.quant_config.weight_block_size[0] // scale_pack_num)]
+                # fastdeploy.model_executor.ops.gpu.masked_per_token_quant_with_output(
+                #     act_out,
+                #     token_nums_per_expert,
+                #     act_out_fp8,
+                #     scale,
+                #     self.quant_config.weight_block_size[0],
+                #     use_ue8m0=self.quant_config.deepgemm_scale_ue8m0,
+                # )
+                ffn_out = up_gate_proj_out
+            else:
+                
+                ffn_out = paddle.empty(
+                    [
+                        layer.num_local_experts,
+                        layer.ep_size * max_tokens_per_rank,
+                        layer.hidden_size,
+                    ],
+                    dtype=paddle.bfloat16,
+                )
 
             deep_gemm.m_grouped_fp8_gemm_nt_masked(
                 (act_out_fp8, scale),
@@ -357,6 +381,13 @@ class DeepGemmFusedMoeMethod(MoEMethodBase):
                 token_nums_per_expert,
                 expected_m,
                 disable_ue8m0_cast=not self.quant_config.deepgemm_scale_ue8m0,
+            )
+
+            tmp_ffn_out = call_depermute_prefill_combine(
+                x=ffn_out,
+                indice_map=permuted_indice_map,
+                topk_weights=recv_topk_weights,
+                num_worst_tokens=recv_x.shape[0],
             )
 
         elif token_all_num > 0:

@@ -118,7 +118,7 @@ class TestPrefillPermuteToMaskedGemm(unittest.TestCase):
 
         # Generate topk_ids with some -1 values (not routed to current rank)
         # Each token should have unique expert indices (no duplicates within a row)
-        topk_ids_np = np.zeros((num_tokens, topk), dtype=np.int32)
+        topk_ids_np = np.zeros((num_tokens, topk), dtype=np.int64)
         for i in range(num_tokens):
             # Sample unique experts for this token
             experts = np.random.choice(num_local_experts, size=min(topk, num_local_experts), replace=False)
@@ -131,7 +131,7 @@ class TestPrefillPermuteToMaskedGemm(unittest.TestCase):
         # Apply sparsity - randomly set some values to -1
         mask = np.random.rand(num_tokens, topk) < sparsity
         topk_ids_np[mask] = -1
-        topk_ids = paddle.to_tensor(topk_ids_np).cast(paddle.int32)
+        topk_ids = paddle.to_tensor(topk_ids_np).cast(paddle.int64)
 
         # Run the kernel
         # print("x", x.astype('float32').sum(axis=1))

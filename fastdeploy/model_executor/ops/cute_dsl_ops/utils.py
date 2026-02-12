@@ -15,11 +15,12 @@
 """
 
 import paddle
-from cutlass import Int32, Float8E4M3FN, BFloat16, Float32
+from cutlass import Int32, Int64, Float8E4M3FN, BFloat16, Float32
 
 paddle2cute_dtype_map = {
     paddle.bfloat16: BFloat16,
     paddle.float32: Float32,
     paddle.int32: Int32,
+    paddle.int64: Int64,
     paddle.float8_e4m3fn: Float8E4M3FN,
 }

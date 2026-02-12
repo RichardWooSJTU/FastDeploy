@@ -17,9 +17,11 @@
 import cutlass
 import cutlass.cute as cute
 import paddle
+import cuda.bindings.driver as cuda
 
 from cutlass.cute.runtime import from_dlpack
 from .utils import paddle2cute_dtype_map
+
 
 
 @cute.kernel
@@ -91,7 +93,7 @@ def prefill_permute_to_masked_gemm_kernel(
         cute.arch.sync_threads()
 
         for expert_slot in range(TOP_K):
-            expert_idx = top_k_idx_tensor[expert_slot]
+            expert_idx = cutlass.Int32(top_k_idx_tensor[expert_slot])
             if expert_idx != -1:
                 if tidx == 0:
                     offset_tensor[0] = cute.arch.atomic_add(token_nums_per_expert[expert_idx, None].iterator, 1)
@@ -134,6 +136,7 @@ def prefill_permute_to_masked_gemm(
     permute_scale: cute.Tensor,
     permuted_indice_map: cute.Tensor,
     token_nums_per_expert: cute.Tensor,
+    stream: cuda.CUstream,
     topk: cutlass.Constexpr,
     copy_bits: cutlass.Constexpr = 128,
 ):
@@ -175,6 +178,7 @@ def prefill_permute_to_masked_gemm(
                                           max_num_tokens_per_expert, topk).launch(
         grid = [num_block_x, 1, 1],
         block = [cute.cosize(thr_layout), 1, 1],
+        stream=stream,
     )
 
 
@@ -218,7 +222,9 @@ def call_prefill_permute_to_masked_gemm(
 
 
     permute_x = paddle.empty([num_local_experts, max_token_num, hidden], dtype=x.dtype)
-    permute_scale = paddle.empty([num_local_experts, max_token_num, hidden_scale], dtype=scale.dtype)
+    permute_scale = paddle.empty([num_local_experts, hidden_scale, max_token_num], dtype=scale.dtype)
+    permute_scale = permute_scale.transpose((0, 2, 1))
+
     permuted_indice_map = paddle.full([num_worst_tokens, topk], fill_value=-1, dtype="int32")
     token_nums_per_expert = paddle.zeros([num_local_experts, 1], dtype="int32")
 
@@ -246,6 +252,7 @@ def call_prefill_permute_to_masked_gemm(
     token_nums_per_expert_tensor = from_dlpack(token_nums_per_expert)
 
     if compile_key not in call_prefill_permute_to_masked_gemm.compile_cache:
+        stream = cute.runtime.make_fake_stream()
         if topk == 4:
             compiled_func = cute.compile(
                 prefill_permute_to_masked_gemm, 
@@ -256,6 +263,7 @@ def call_prefill_permute_to_masked_gemm(
                 permute_scale_tensor, 
                 permuted_indice_map_tensor,
                 token_nums_per_expert_tensor,
+                stream,
                 4,
                 options="--generate-line-info"
             )
@@ -269,10 +277,14 @@ def call_prefill_permute_to_masked_gemm(
                 permute_scale_tensor, 
                 permuted_indice_map_tensor,
                 token_nums_per_expert_tensor,
+                stream,
                 8,
                 options="--generate-line-info"
             )
         call_prefill_permute_to_masked_gemm.compile_cache[compile_key] = compiled_func
+
+
+    stream = cuda.CUstream(paddle.device.current_stream().stream_base.cuda_stream)
 
     call_prefill_permute_to_masked_gemm.compile_cache[compile_key](
         x_tensor, 
@@ -282,6 +294,7 @@ def call_prefill_permute_to_masked_gemm(
         permute_scale_tensor, 
         permuted_indice_map_tensor,
         token_nums_per_expert_tensor,
+        stream,
     )
 
     return permute_x, permute_scale, permuted_indice_map, token_nums_per_expert
